@@ -1,4 +1,11 @@
-import { KeyboardEvent, PointerEvent, useEffect, useRef, useState } from "react";
+import {
+  KeyboardEvent,
+  PointerEvent,
+  WheelEvent,
+  useEffect,
+  useRef,
+  useState
+} from "react";
 import * as pdfjsLib from "pdfjs-dist/build/pdf";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.js?url";
 import "pdfjs-dist/web/pdf_viewer.css";
@@ -6,8 +13,24 @@ import "pdfjs-dist/web/pdf_viewer.css";
 type PdfReaderProps = {
   fileData: Uint8Array | null;
   scale: number;
+  pageJumpRequest: PageJumpRequest | null;
+  onZoomByDelta: (delta: number) => void;
   onDocumentLoad: (pageCount: number) => void;
+  onCurrentPageChange: (pageNumber: number) => void;
+  onOutlineLoad: (outline: PdfOutlineItem[]) => void;
   onSelectionChange: (text: string) => void;
+};
+
+export type PageJumpRequest = {
+  pageNumber: number;
+  requestId: number;
+};
+
+export type PdfOutlineItem = {
+  id: string;
+  title: string;
+  pageNumber: number | null;
+  items: PdfOutlineItem[];
 };
 
 type RenderState =
@@ -47,12 +70,35 @@ type TextRect = {
   centerY: number;
 };
 
+type PdfOutlineSourceItem = {
+  title?: string;
+  dest?: string | unknown[] | null;
+  items?: PdfOutlineSourceItem[];
+};
+
+type PdfDocumentProxy = {
+  numPages: number;
+  getPage: (pageNumber: number) => Promise<any>;
+  getOutline: () => Promise<PdfOutlineSourceItem[] | null>;
+  getDestination: (id: string) => Promise<unknown[] | null>;
+  getPageIndex: (ref: unknown) => Promise<number>;
+};
+
+type PdfLoadingTask = {
+  promise: Promise<PdfDocumentProxy>;
+  destroy: () => Promise<void>;
+};
+
 (pdfjsLib.GlobalWorkerOptions as { workerSrc: string }).workerSrc = workerUrl;
 
 export default function PdfReader({
   fileData,
   scale,
+  pageJumpRequest,
+  onZoomByDelta,
   onDocumentLoad,
+  onCurrentPageChange,
+  onOutlineLoad,
   onSelectionChange
 }: PdfReaderProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -73,32 +119,35 @@ export default function PdfReader({
     if (!fileData) {
       setRenderState({ status: "idle" });
       onDocumentLoad(0);
+      onCurrentPageChange(0);
+      onOutlineLoad([]);
       return;
     }
 
     const pdfData = fileData;
     const pageContainer = pagesElement;
     let cancelled = false;
-    let loadingTask: {
-      promise: Promise<{
-        numPages: number;
-        getPage: (pageNumber: number) => Promise<any>;
-      }>;
-      destroy: () => Promise<void>;
-    } | null = null;
+    let loadingTask: PdfLoadingTask | null = null;
     const renderTasks: Array<{ cancel: () => void }> = [];
 
     async function renderPdf() {
       setRenderState({ status: "loading" });
 
-      loadingTask = pdfjsLib.getDocument({ data: pdfData.slice() });
-      const pdfDocument = await loadingTask.promise;
+      const task = pdfjsLib.getDocument({ data: pdfData.slice() }) as PdfLoadingTask;
+      loadingTask = task;
+      const pdfDocument = await task.promise;
 
       if (cancelled) {
         return;
       }
 
       onDocumentLoad(pdfDocument.numPages);
+      onCurrentPageChange(1);
+      resolveOutline(pdfDocument).then((outline) => {
+        if (!cancelled) {
+          onOutlineLoad(outline);
+        }
+      });
       pageContainer.innerHTML = "";
 
       for (let pageNumber = 1; pageNumber <= pdfDocument.numPages; pageNumber += 1) {
@@ -180,7 +229,15 @@ export default function PdfReader({
       renderTasks.forEach((task) => task.cancel());
       void loadingTask?.destroy();
     };
-  }, [fileData, onDocumentLoad, scale]);
+  }, [fileData, onCurrentPageChange, onDocumentLoad, onOutlineLoad, scale]);
+
+  useEffect(() => {
+    if (!pageJumpRequest) {
+      return;
+    }
+
+    scrollToPage(scrollRef.current, pageJumpRequest.pageNumber);
+  }, [pageJumpRequest]);
 
   const handlePointerDown = (event: PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) {
@@ -216,7 +273,6 @@ export default function PdfReader({
     }
 
     clearGeometryHighlight(scrollElement);
-    onSelectionChange("");
   };
 
   const handleSelection = (event?: PointerEvent<HTMLDivElement>) => {
@@ -249,7 +305,6 @@ export default function PdfReader({
       }
 
       clearGeometryHighlight(scrollElement);
-      onSelectionChange("");
       return;
     }
 
@@ -257,7 +312,6 @@ export default function PdfReader({
 
     if (!scrollElement || !selection || selection.isCollapsed) {
       clearGeometryHighlight(scrollElement);
-      onSelectionChange("");
       return;
     }
 
@@ -281,11 +335,27 @@ export default function PdfReader({
     isDraggingSelectionRef.current = false;
     selectionStartRef.current = null;
     clearGeometryHighlight(scrollRef.current);
-    onSelectionChange("");
   };
 
   const handleKeyboardSelection = (_event: KeyboardEvent<HTMLDivElement>) => {
     handleSelection();
+  };
+
+  const handleWheel = (event: WheelEvent<HTMLDivElement>) => {
+    if (!event.ctrlKey && !event.metaKey) {
+      return;
+    }
+
+    event.preventDefault();
+    onZoomByDelta(event.deltaY < 0 ? 0.1 : -0.1);
+  };
+
+  const handleScroll = () => {
+    const pageNumber = getMostVisiblePageNumber(scrollRef.current);
+
+    if (pageNumber > 0) {
+      onCurrentPageChange(pageNumber);
+    }
   };
 
   return (
@@ -293,6 +363,8 @@ export default function PdfReader({
       ref={scrollRef}
       className="pdf-scroll"
       tabIndex={0}
+      onScroll={handleScroll}
+      onWheel={handleWheel}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handleSelection}
@@ -528,4 +600,108 @@ function clearGeometryHighlight(scrollElement: HTMLElement | null) {
   scrollElement
     ?.querySelectorAll(".pdf-geometry-highlight")
     .forEach((element) => element.remove());
+}
+
+async function resolveOutline(
+  pdfDocument: PdfDocumentProxy
+): Promise<PdfOutlineItem[]> {
+  const outline = await pdfDocument.getOutline();
+
+  if (!outline) {
+    return [];
+  }
+
+  return resolveOutlineItems(pdfDocument, outline, "outline");
+}
+
+async function resolveOutlineItems(
+  pdfDocument: PdfDocumentProxy,
+  items: PdfOutlineSourceItem[],
+  path: string
+): Promise<PdfOutlineItem[]> {
+  const resolvedItems = await Promise.all(
+    items.map(async (item, index) => {
+      const id = `${path}-${index}`;
+      const childItems = item.items?.length
+        ? await resolveOutlineItems(pdfDocument, item.items, id)
+        : [];
+
+      return {
+        id,
+        title: item.title?.trim() || "Untitled",
+        pageNumber: await resolveOutlinePageNumber(pdfDocument, item.dest),
+        items: childItems
+      };
+    })
+  );
+
+  return resolvedItems;
+}
+
+async function resolveOutlinePageNumber(
+  pdfDocument: PdfDocumentProxy,
+  dest: string | unknown[] | null | undefined
+): Promise<number | null> {
+  try {
+    const explicitDest = typeof dest === "string"
+      ? await pdfDocument.getDestination(dest)
+      : dest;
+    const pageRef = explicitDest?.[0];
+
+    if (!pageRef) {
+      return null;
+    }
+
+    if (typeof pageRef === "number") {
+      return pageRef + 1;
+    }
+
+    return (await pdfDocument.getPageIndex(pageRef)) + 1;
+  } catch {
+    return null;
+  }
+}
+
+function scrollToPage(scrollElement: HTMLElement | null, pageNumber: number) {
+  const pageElement = scrollElement?.querySelector<HTMLElement>(
+    `.pdf-page[data-page-number="${pageNumber}"]`
+  );
+
+  if (!scrollElement || !pageElement) {
+    return;
+  }
+
+  const scrollRect = scrollElement.getBoundingClientRect();
+  const pageRect = pageElement.getBoundingClientRect();
+  scrollElement.scrollTo({
+    top: scrollElement.scrollTop + pageRect.top - scrollRect.top - 16,
+    behavior: "smooth"
+  });
+}
+
+function getMostVisiblePageNumber(scrollElement: HTMLElement | null): number {
+  if (!scrollElement) {
+    return 0;
+  }
+
+  const scrollRect = scrollElement.getBoundingClientRect();
+  const pages = Array.from(
+    scrollElement.querySelectorAll<HTMLElement>(".pdf-page")
+  );
+  let bestPageNumber = 0;
+  let bestVisibleHeight = 0;
+
+  for (const page of pages) {
+    const pageRect = page.getBoundingClientRect();
+    const visibleHeight =
+      Math.min(pageRect.bottom, scrollRect.bottom) -
+      Math.max(pageRect.top, scrollRect.top);
+
+    if (visibleHeight > bestVisibleHeight) {
+      bestVisibleHeight = visibleHeight;
+      bestPageNumber = Number(page.dataset.pageNumber) || 0;
+    }
+  }
+
+  return bestPageNumber;
 }

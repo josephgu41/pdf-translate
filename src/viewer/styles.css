@@ -22,23 +22,64 @@ input {
   font: inherit;
 }
 
+button:disabled,
+input:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .app-shell {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 380px;
+  grid-template-columns: minmax(320px, 1fr) 8px minmax(280px, var(--translation-width, 380px));
   height: 100vh;
   min-height: 0;
   min-width: 0;
   overflow: hidden;
 }
 
+.app-shell.is-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
 .reader-pane {
+  position: relative;
   display: grid;
   grid-template-rows: 56px minmax(0, 1fr);
   min-height: 0;
   min-width: 0;
   overflow: hidden;
-  border-right: 1px solid #ccd5de;
   background: #dfe5eb;
+}
+
+.reader-pane.is-drag-active {
+  background: #d7e2eb;
+}
+
+.pane-divider {
+  width: 8px;
+  min-width: 8px;
+  border-right: 1px solid #ccd5de;
+  border-left: 1px solid #ccd5de;
+  background: #d4dde6;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.pane-divider::before {
+  display: block;
+  width: 2px;
+  height: 44px;
+  margin: calc(50vh - 22px) auto 0;
+  border-radius: 999px;
+  background: #8fa0ae;
+  content: "";
+}
+
+.pane-divider:hover,
+.pane-divider:focus-visible,
+.app-shell.is-resizing .pane-divider {
+  background: #c4d1dd;
 }
 
 .toolbar {
@@ -101,11 +142,131 @@ input {
   font-weight: 700;
 }
 
+.page-jump {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.page-input {
+  width: 60px;
+  height: 34px;
+  border: 1px solid #aab7c4;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #172026;
+  text-align: center;
+}
+
+.page-count {
+  color: #536474;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.jump-button {
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid #aab7c4;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #172026;
+  cursor: pointer;
+}
+
+.jump-button:hover:not(:disabled) {
+  border-color: #607588;
+  background: #f1f5f8;
+}
+
 .zoom-label {
   width: 52px;
   color: #405363;
   font-size: 13px;
   text-align: center;
+}
+
+.reader-content {
+  display: grid;
+  grid-template-columns: minmax(160px, 220px) minmax(0, 1fr);
+  min-height: 0;
+  min-width: 0;
+}
+
+.outline-pane {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  border-right: 1px solid #c6d0da;
+  background: #edf2f5;
+}
+
+.outline-title {
+  padding: 11px 12px;
+  border-bottom: 1px solid #d2dce4;
+  color: #405363;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.outline-list,
+.outline-empty {
+  min-height: 0;
+  overflow: auto;
+  padding: 8px;
+}
+
+.outline-empty {
+  color: #657586;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.outline-item {
+  min-width: 0;
+}
+
+.outline-link {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  width: 100%;
+  min-height: 30px;
+  gap: 8px;
+  padding: 5px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #263746;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1.35;
+  text-align: left;
+}
+
+.outline-link:hover:not(:disabled),
+.outline-link:focus-visible {
+  background: #dfe8ef;
+}
+
+.outline-link span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.outline-page {
+  color: #6a7a88;
+  font-size: 12px;
+}
+
+.outline-children {
+  padding-left: 12px;
 }
 
 .pdf-scroll {
@@ -164,6 +325,21 @@ input {
   color: #405363;
   text-align: center;
   box-shadow: 0 14px 34px rgb(39 53 66 / 14%);
+}
+
+.drop-overlay {
+  position: absolute;
+  inset: 76px 24px 24px;
+  z-index: 10;
+  display: grid;
+  place-items: center;
+  border: 2px dashed #607588;
+  border-radius: 8px;
+  background: rgb(248 250 251 / 86%);
+  color: #273542;
+  font-size: 18px;
+  font-weight: 700;
+  pointer-events: none;
 }
 
 .reader-error {
@@ -272,12 +448,15 @@ input {
 @media (max-width: 880px) {
   .app-shell {
     grid-template-columns: 1fr;
-    grid-template-rows: minmax(0, 1fr) minmax(320px, 42%);
+    grid-template-rows: minmax(0, 1fr) 0 minmax(320px, 42%);
   }
 
   .reader-pane {
-    border-right: 0;
     border-bottom: 1px solid #ccd5de;
+  }
+
+  .pane-divider {
+    display: none;
   }
 
   .translation-pane {
@@ -298,6 +477,18 @@ input {
 
   .reader-pane {
     grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .toolbar-group {
+    flex-wrap: wrap;
+  }
+
+  .reader-content {
+    grid-template-columns: 1fr;
+  }
+
+  .outline-pane {
+    display: none;
   }
 
   .translation-pane {

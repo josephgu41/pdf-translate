@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "PDF Select Translator",
+  "version": "0.1.0",
+  "description": "Translate selected PDF text in a dedicated reader without using the clipboard.",
+  "action": {
+    "default_title": "Open PDF Select Translator"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "host_permissions": ["https://translate.googleapis.com/*"]
+}

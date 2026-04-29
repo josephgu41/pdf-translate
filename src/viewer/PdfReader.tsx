@@ -50,6 +50,12 @@ type SelectedLine = {
   page: HTMLElement;
 };
 
+type ScrollAnchor = {
+  pageNumber: number;
+  offsetRatio: number;
+  leftRatio: number;
+};
+
 type GeometrySelection = {
   text: string;
   highlights: HighlightRect[];
@@ -103,6 +109,7 @@ export default function PdfReader({
 }: PdfReaderProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const pagesRef = useRef<HTMLDivElement | null>(null);
+  const previousFileDataRef = useRef<Uint8Array | null>(null);
   const selectionStartRef = useRef<PointerPoint | null>(null);
   const isDraggingSelectionRef = useRef(false);
   const [renderState, setRenderState] = useState<RenderState>({ status: "idle" });
@@ -114,9 +121,9 @@ export default function PdfReader({
       return;
     }
 
-    pagesElement.innerHTML = "";
-
     if (!fileData) {
+      pagesElement.innerHTML = "";
+      previousFileDataRef.current = null;
       setRenderState({ status: "idle" });
       onDocumentLoad(0);
       onCurrentPageChange(0);
@@ -126,12 +133,25 @@ export default function PdfReader({
 
     const pdfData = fileData;
     const pageContainer = pagesElement;
+    const isSameDocument = previousFileDataRef.current === fileData;
+    const scrollAnchor = isSameDocument
+      ? getScrollAnchor(scrollRef.current)
+      : null;
+    const hasRenderedPages = isSameDocument && pageContainer.childElementCount > 0;
     let cancelled = false;
     let loadingTask: PdfLoadingTask | null = null;
     const renderTasks: Array<{ cancel: () => void }> = [];
 
+    previousFileDataRef.current = fileData;
+
+    if (!isSameDocument) {
+      pageContainer.innerHTML = "";
+    }
+
     async function renderPdf() {
-      setRenderState({ status: "loading" });
+      if (!hasRenderedPages) {
+        setRenderState({ status: "loading" });
+      }
 
       const task = pdfjsLib.getDocument({ data: pdfData.slice() }) as PdfLoadingTask;
       loadingTask = task;
@@ -141,14 +161,17 @@ export default function PdfReader({
         return;
       }
 
-      onDocumentLoad(pdfDocument.numPages);
-      onCurrentPageChange(1);
-      resolveOutline(pdfDocument).then((outline) => {
-        if (!cancelled) {
-          onOutlineLoad(outline);
-        }
-      });
-      pageContainer.innerHTML = "";
+      if (!isSameDocument) {
+        onDocumentLoad(pdfDocument.numPages);
+        onCurrentPageChange(1);
+        resolveOutline(pdfDocument).then((outline) => {
+          if (!cancelled) {
+            onOutlineLoad(outline);
+          }
+        });
+      }
+
+      const nextPages = document.createDocumentFragment();
 
       for (let pageNumber = 1; pageNumber <= pdfDocument.numPages; pageNumber += 1) {
         if (cancelled) {
@@ -184,7 +207,7 @@ export default function PdfReader({
         textLayerElement.style.height = `${viewport.height}px`;
 
         pageElement.append(canvas, textLayerElement);
-        pageContainer.append(pageElement);
+        nextPages.append(pageElement);
 
         const renderTask = page.render({
           canvasContext,
@@ -209,6 +232,8 @@ export default function PdfReader({
       }
 
       if (!cancelled) {
+        pageContainer.replaceChildren(nextPages);
+        restoreScrollAnchor(scrollRef.current, scrollAnchor);
         setRenderState({ status: "ready" });
       }
     }
@@ -677,6 +702,81 @@ function scrollToPage(scrollElement: HTMLElement | null, pageNumber: number) {
     top: scrollElement.scrollTop + pageRect.top - scrollRect.top - 16,
     behavior: "smooth"
   });
+}
+
+function getScrollAnchor(scrollElement: HTMLElement | null): ScrollAnchor | null {
+  if (!scrollElement) {
+    return null;
+  }
+
+  const scrollRect = scrollElement.getBoundingClientRect();
+  const pages = Array.from(
+    scrollElement.querySelectorAll<HTMLElement>(".pdf-page")
+  );
+  let anchorPage: HTMLElement | null = null;
+  let bestVisibleHeight = 0;
+
+  for (const page of pages) {
+    const pageRect = page.getBoundingClientRect();
+    const visibleHeight =
+      Math.min(pageRect.bottom, scrollRect.bottom) -
+      Math.max(pageRect.top, scrollRect.top);
+
+    if (visibleHeight > bestVisibleHeight) {
+      bestVisibleHeight = visibleHeight;
+      anchorPage = page;
+    }
+  }
+
+  if (!anchorPage) {
+    return null;
+  }
+
+  const pageNumber = Number(anchorPage.dataset.pageNumber) || 0;
+  const pageOffset = scrollElement.scrollTop - anchorPage.offsetTop;
+  const maxPageOffset = Math.max(anchorPage.offsetHeight, 1);
+  const maxScrollLeft = Math.max(
+    scrollElement.scrollWidth - scrollElement.clientWidth,
+    1
+  );
+
+  return {
+    pageNumber,
+    offsetRatio: clamp(pageOffset / maxPageOffset, 0, 1),
+    leftRatio: clamp(scrollElement.scrollLeft / maxScrollLeft, 0, 1)
+  };
+}
+
+function restoreScrollAnchor(
+  scrollElement: HTMLElement | null,
+  anchor: ScrollAnchor | null
+) {
+  if (!scrollElement || !anchor) {
+    return;
+  }
+
+  const pageElement = scrollElement.querySelector<HTMLElement>(
+    `.pdf-page[data-page-number="${anchor.pageNumber}"]`
+  );
+
+  if (!pageElement) {
+    return;
+  }
+
+  const maxScrollLeft = Math.max(
+    scrollElement.scrollWidth - scrollElement.clientWidth,
+    0
+  );
+
+  scrollElement.scrollTo({
+    top: pageElement.offsetTop + pageElement.offsetHeight * anchor.offsetRatio,
+    left: maxScrollLeft * anchor.leftRatio,
+    behavior: "auto"
+  });
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
 }
 
 function getMostVisiblePageNumber(scrollElement: HTMLElement | null): number {

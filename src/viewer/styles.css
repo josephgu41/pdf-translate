@@ -138,6 +138,17 @@ input {
   display: block;
 }
 
+.textLayer {
+  user-select: none;
+}
+
+.pdf-geometry-highlight {
+  position: absolute;
+  z-index: 1;
+  pointer-events: none;
+  background: rgb(67 56 202 / 32%);
+}
+
 .reader-empty,
 .reader-status,
 .reader-error {

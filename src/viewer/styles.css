@@ -301,7 +301,12 @@ input:disabled {
 }
 
 .textLayer {
-  user-select: none;
+  z-index: 2;
+  user-select: text;
+}
+
+.textLayer ::selection {
+  background: rgb(67 56 202 / 28%);
 }
 
 .pdf-geometry-highlight {

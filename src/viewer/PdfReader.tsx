@@ -1,5 +1,6 @@
 import {
   KeyboardEvent,
+  PointerEvent,
   WheelEvent,
   useEffect,
   useRef,
@@ -53,6 +54,34 @@ type HighlightRect = {
   height: number;
 };
 
+type TextSegment = HighlightRect & {
+  text: string;
+  start: number;
+  end: number;
+  lineIndex: number;
+};
+
+type TextLine = HighlightRect & {
+  start: number;
+  end: number;
+  segments: TextSegment[];
+};
+
+type TextSelectionModel = {
+  text: string;
+  lines: TextLine[];
+  segments: TextSegment[];
+};
+
+type TextHit = {
+  offset: number;
+};
+
+type DragSelection = {
+  pointerId: number;
+  start: TextHit;
+};
+
 type PdfOutlineSourceItem = {
   title?: string;
   dest?: string | unknown[] | null;
@@ -88,6 +117,8 @@ export default function PdfReader({
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const pagesRef = useRef<HTMLDivElement | null>(null);
   const previousFileDataRef = useRef<Uint8Array | null>(null);
+  const selectionModelRef = useRef<TextSelectionModel | null>(null);
+  const dragSelectionRef = useRef<DragSelection | null>(null);
   const [renderState, setRenderState] = useState<RenderState>({ status: "idle" });
 
   useEffect(() => {
@@ -99,6 +130,7 @@ export default function PdfReader({
 
     if (!fileData) {
       pagesElement.innerHTML = "";
+      selectionModelRef.current = null;
       previousFileDataRef.current = null;
       setRenderState({ status: "idle" });
       onDocumentLoad(0);
@@ -122,6 +154,7 @@ export default function PdfReader({
 
     if (!isSameDocument) {
       pageContainer.innerHTML = "";
+      selectionModelRef.current = null;
     }
 
     async function renderPdf() {
@@ -209,6 +242,7 @@ export default function PdfReader({
 
       if (!cancelled) {
         pageContainer.replaceChildren(nextPages);
+        selectionModelRef.current = buildTextSelectionModel(pageContainer);
         restoreScrollAnchor(scrollRef.current, scrollAnchor);
         setRenderState({ status: "ready" });
       }
@@ -227,6 +261,7 @@ export default function PdfReader({
 
     return () => {
       cancelled = true;
+      dragSelectionRef.current = null;
       renderTasks.forEach((task) => task.cancel());
       void loadingTask?.destroy();
     };
@@ -240,11 +275,82 @@ export default function PdfReader({
     scrollToPage(scrollRef.current, pageJumpRequest.pageNumber);
   }, [pageJumpRequest]);
 
-  const handlePointerDown = () => {
+  const handlePointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    const scrollElement = scrollRef.current;
+    const model = selectionModelRef.current;
+    const hit = model
+      ? getTextHitAtPoint(model, event.clientX, event.clientY)
+      : null;
+
     clearGeometryHighlight(scrollRef.current);
+    window.getSelection()?.removeAllRanges();
+
+    if (!scrollElement || !hit || event.button !== 0) {
+      dragSelectionRef.current = null;
+      onSelectionChange("");
+      return;
+    }
+
+    event.preventDefault();
+    scrollElement.setPointerCapture(event.pointerId);
+    dragSelectionRef.current = {
+      pointerId: event.pointerId,
+      start: hit
+    };
+    onSelectionChange("");
   };
 
-  const handleSelection = () => {
+  const handlePointerMove = (event: PointerEvent<HTMLDivElement>) => {
+    const dragSelection = dragSelectionRef.current;
+    const scrollElement = scrollRef.current;
+    const model = selectionModelRef.current;
+
+    if (!dragSelection || !scrollElement || !model) {
+      return;
+    }
+
+    const hit = getTextHitAtPoint(model, event.clientX, event.clientY);
+
+    if (!hit) {
+      return;
+    }
+
+    const selection = getCustomSelection(model, dragSelection.start, hit);
+    applyGeometryHighlight(scrollElement, selection.highlights);
+  };
+
+  const handlePointerUp = (event: PointerEvent<HTMLDivElement>) => {
+    const dragSelection = dragSelectionRef.current;
+    const scrollElement = scrollRef.current;
+    const model = selectionModelRef.current;
+
+    if (!dragSelection || dragSelection.pointerId !== event.pointerId) {
+      return;
+    }
+
+    dragSelectionRef.current = null;
+    if (scrollElement?.hasPointerCapture(event.pointerId)) {
+      scrollElement.releasePointerCapture(event.pointerId);
+    }
+
+    if (!scrollElement || !model) {
+      return;
+    }
+
+    const hit = getTextHitAtPoint(model, event.clientX, event.clientY);
+
+    if (!hit) {
+      clearGeometryHighlight(scrollElement);
+      onSelectionChange("");
+      return;
+    }
+
+    const selection = getCustomSelection(model, dragSelection.start, hit);
+    applyGeometryHighlight(scrollElement, selection.highlights);
+    onSelectionChange(selection.text.trim());
+  };
+
+  const handleNativeSelection = () => {
     const scrollElement = scrollRef.current;
     const selection = window.getSelection();
 
@@ -277,7 +383,7 @@ export default function PdfReader({
   };
 
   const handleKeyboardSelection = (_event: KeyboardEvent<HTMLDivElement>) => {
-    handleSelection();
+    handleNativeSelection();
   };
 
   const handleWheel = (event: WheelEvent<HTMLDivElement>) => {
@@ -310,7 +416,9 @@ export default function PdfReader({
       onScroll={handleScroll}
       onWheel={handleWheel}
       onPointerDown={handlePointerDown}
-      onPointerUp={handleSelection}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerUp}
       onKeyUp={handleKeyboardSelection}
     >
       <div ref={pagesRef} className="pdf-pages" style={pagesStyle} />
@@ -326,6 +434,279 @@ export default function PdfReader({
       )}
     </div>
   );
+}
+
+function buildTextSelectionModel(container: HTMLElement): TextSelectionModel {
+  const pages = Array.from(container.querySelectorAll<HTMLElement>(".pdf-page"));
+  const lineCandidates: Array<Omit<TextLine, "start" | "end" | "segments"> & {
+    segments: Array<Omit<TextSegment, "start" | "end" | "lineIndex">>;
+  }> = [];
+
+  for (const page of pages) {
+    const pageRect = page.getBoundingClientRect();
+    const textElements = Array.from(
+      page.querySelectorAll<HTMLElement>(".textLayer span")
+    )
+      .map((element) => {
+        const text = element.textContent ?? "";
+        const rect = element.getBoundingClientRect();
+
+        if (!text || rect.width <= 0 || rect.height <= 0) {
+          return null;
+        }
+
+        return {
+          page,
+          text,
+          left: rect.left - pageRect.left,
+          top: rect.top - pageRect.top,
+          width: rect.width,
+          height: rect.height
+        };
+      })
+      .filter((segment): segment is Omit<TextSegment, "start" | "end" | "lineIndex"> =>
+        segment !== null
+      )
+      .sort((a, b) => a.top - b.top || a.left - b.left);
+
+    for (const segment of textElements) {
+      const segmentCenter = segment.top + segment.height / 2;
+      const matchingLine = lineCandidates.find((line) => {
+        const lineCenter = line.top + line.height / 2;
+        return (
+          line.page === segment.page &&
+          Math.abs(segmentCenter - lineCenter) <=
+            Math.max(4, Math.min(line.height, segment.height) * 0.65)
+        );
+      });
+
+      if (matchingLine) {
+        matchingLine.segments.push(segment);
+        const right = Math.max(matchingLine.left + matchingLine.width, segment.left + segment.width);
+        const bottom = Math.max(matchingLine.top + matchingLine.height, segment.top + segment.height);
+        matchingLine.left = Math.min(matchingLine.left, segment.left);
+        matchingLine.top = Math.min(matchingLine.top, segment.top);
+        matchingLine.width = right - matchingLine.left;
+        matchingLine.height = bottom - matchingLine.top;
+      } else {
+        lineCandidates.push({
+          page: segment.page,
+          left: segment.left,
+          top: segment.top,
+          width: segment.width,
+          height: segment.height,
+          segments: [segment]
+        });
+      }
+    }
+  }
+
+  lineCandidates.sort((a, b) => {
+    const pageA = Number(a.page.dataset.pageNumber) || 0;
+    const pageB = Number(b.page.dataset.pageNumber) || 0;
+    return pageA - pageB || a.top - b.top || a.left - b.left;
+  });
+
+  let text = "";
+  const lines: TextLine[] = [];
+  const segments: TextSegment[] = [];
+
+  lineCandidates.forEach((lineCandidate, lineIndex) => {
+    if (text) {
+      text += "\n";
+    }
+
+    lineCandidate.segments.sort((a, b) => a.left - b.left);
+    const lineStart = text.length;
+
+    lineCandidate.segments.forEach((segment, segmentIndex) => {
+      const previous = lineCandidate.segments[segmentIndex - 1];
+
+      if (
+        previous &&
+        shouldInsertSpaceBetweenSegments(previous, segment, text[text.length - 1])
+      ) {
+        text += " ";
+      }
+
+      const start = text.length;
+      text += segment.text;
+      const end = text.length;
+      segments.push({
+        ...segment,
+        start,
+        end,
+        lineIndex
+      });
+    });
+
+    lines.push({
+      page: lineCandidate.page,
+      left: lineCandidate.left,
+      top: lineCandidate.top,
+      width: lineCandidate.width,
+      height: lineCandidate.height,
+      start: lineStart,
+      end: text.length,
+      segments: segments.filter((segment) => segment.lineIndex === lineIndex)
+    });
+  });
+
+  return { text, lines, segments };
+}
+
+function shouldInsertSpaceBetweenSegments(
+  previous: Pick<TextSegment, "text" | "left" | "width">,
+  next: Pick<TextSegment, "text" | "left" | "width">,
+  lastCharacter: string | undefined
+): boolean {
+  if (!lastCharacter || /\s/.test(lastCharacter) || /^\s/.test(next.text)) {
+    return false;
+  }
+
+  const gap = next.left - (previous.left + previous.width);
+  const averageCharacterWidth = previous.width / Math.max(previous.text.length, 1);
+
+  return gap > averageCharacterWidth * 0.75;
+}
+
+function getTextHitAtPoint(
+  model: TextSelectionModel,
+  clientX: number,
+  clientY: number
+): TextHit | null {
+  const page = document
+    .elementFromPoint(clientX, clientY)
+    ?.closest<HTMLElement>(".pdf-page");
+
+  if (!page) {
+    return null;
+  }
+
+  const pageRect = page.getBoundingClientRect();
+  const x = clientX - pageRect.left;
+  const y = clientY - pageRect.top;
+  const pageLines = model.lines.filter((line) => line.page === page);
+
+  if (!pageLines.length) {
+    return null;
+  }
+
+  const line = pageLines.reduce((bestLine, nextLine) => {
+    const bestDistance = getLineDistance(bestLine, y);
+    const nextDistance = getLineDistance(nextLine, y);
+    return nextDistance < bestDistance ? nextLine : bestLine;
+  });
+
+  if (getLineDistance(line, y) > Math.max(12, line.height * 1.4)) {
+    return null;
+  }
+
+  if (x <= line.left) {
+    return { offset: line.start };
+  }
+
+  if (x >= line.left + line.width) {
+    return { offset: line.end };
+  }
+
+  const containingSegment = line.segments.find((segment) =>
+    x >= segment.left && x <= segment.left + segment.width
+  );
+
+  if (containingSegment) {
+    return {
+      offset: getSegmentOffset(containingSegment, x)
+    };
+  }
+
+  const previousSegment = [...line.segments]
+    .reverse()
+    .find((segment) => segment.left + segment.width < x);
+  const nextSegment = line.segments.find((segment) => segment.left > x);
+
+  if (previousSegment && nextSegment) {
+    const previousRight = previousSegment.left + previousSegment.width;
+    const middle = previousRight + (nextSegment.left - previousRight) / 2;
+    return {
+      offset: x < middle ? previousSegment.end : nextSegment.start
+    };
+  }
+
+  if (previousSegment) {
+    return { offset: previousSegment.end };
+  }
+
+  if (nextSegment) {
+    return { offset: nextSegment.start };
+  }
+
+  return { offset: line.start };
+}
+
+function getLineDistance(line: TextLine, y: number): number {
+  if (y >= line.top && y <= line.top + line.height) {
+    return 0;
+  }
+
+  const center = line.top + line.height / 2;
+  return Math.abs(y - center);
+}
+
+function getSegmentOffset(segment: TextSegment, x: number): number {
+  const characterWidth = segment.width / Math.max(segment.text.length, 1);
+  const localOffset = Math.round((x - segment.left) / characterWidth);
+
+  return clamp(segment.start + localOffset, segment.start, segment.end);
+}
+
+function getCustomSelection(
+  model: TextSelectionModel,
+  startHit: TextHit,
+  endHit: TextHit
+): { text: string; highlights: HighlightRect[] } {
+  const start = Math.min(startHit.offset, endHit.offset);
+  const end = Math.max(startHit.offset, endHit.offset);
+
+  if (end <= start) {
+    return { text: "", highlights: [] };
+  }
+
+  return {
+    text: model.text.slice(start, end),
+    highlights: getCustomSelectionHighlightRects(model, start, end)
+  };
+}
+
+function getCustomSelectionHighlightRects(
+  model: TextSelectionModel,
+  selectionStart: number,
+  selectionEnd: number
+): HighlightRect[] {
+  const highlights: HighlightRect[] = [];
+
+  for (const segment of model.segments) {
+    const start = Math.max(selectionStart, segment.start);
+    const end = Math.min(selectionEnd, segment.end);
+
+    if (end <= start) {
+      continue;
+    }
+
+    const characterWidth = segment.width / Math.max(segment.text.length, 1);
+    const left = segment.left + (start - segment.start) * characterWidth;
+    const width = (end - start) * characterWidth;
+
+    highlights.push({
+      page: segment.page,
+      left,
+      top: segment.top,
+      width,
+      height: segment.height
+    });
+  }
+
+  return highlights;
 }
 
 function getSelectionHighlightRects(

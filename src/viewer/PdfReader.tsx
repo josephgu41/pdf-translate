@@ -13,6 +13,7 @@ import "pdfjs-dist/web/pdf_viewer.css";
 type PdfReaderProps = {
   fileData: Uint8Array | null;
   scale: number;
+  previewScale: number;
   pageJumpRequest: PageJumpRequest | null;
   onZoomByDelta: (delta: number) => void;
   onDocumentLoad: (pageCount: number) => void;
@@ -100,6 +101,7 @@ type PdfLoadingTask = {
 export default function PdfReader({
   fileData,
   scale,
+  previewScale,
   pageJumpRequest,
   onZoomByDelta,
   onDocumentLoad,
@@ -383,6 +385,11 @@ export default function PdfReader({
     }
   };
 
+  const zoomRatio = previewScale !== scale ? previewScale / scale : 1;
+  const pagesStyle = zoomRatio !== 1
+    ? { transform: `scale(${zoomRatio})`, transformOrigin: "center top" }
+    : undefined;
+
   return (
     <div
       ref={scrollRef}
@@ -396,7 +403,7 @@ export default function PdfReader({
       onPointerCancel={handlePointerCancel}
       onKeyUp={handleKeyboardSelection}
     >
-      <div ref={pagesRef} className="pdf-pages" />
+      <div ref={pagesRef} className="pdf-pages" style={pagesStyle} />
 
       {renderState.status === "idle" && (
         <div className="reader-empty">Choose a PDF to begin.</div>
@@ -463,61 +470,145 @@ function getGeometrySelection(
   const lastLine = Math.max(startLine, endLine);
   const isForwardSelection =
     startLine < endLine || (startLine === endLine && start.x <= end.x);
-  const selected: TextRect[] = [];
+
+  // Determine the X boundary for partial line selection
+  let selStartX: number;
+  let selEndX: number;
+
+  if (startLine === endLine) {
+    selStartX = Math.min(start.x, end.x);
+    selEndX = Math.max(start.x, end.x);
+  } else if (isForwardSelection) {
+    selStartX = start.x;
+    selEndX = end.x;
+  } else {
+    selStartX = end.x;
+    selEndX = start.x;
+  }
+
+  const highlights: HighlightRect[] = [];
+  const textParts: string[] = [];
 
   for (let index = firstLine; index <= lastLine; index += 1) {
     const line = lines[index];
-    let minX = Number.NEGATIVE_INFINITY;
-    let maxX = Number.POSITIVE_INFINITY;
+    const isFirst = index === firstLine;
+    const isLast = index === lastLine;
+    const isSingleLine = firstLine === lastLine;
 
-    if (startLine === endLine) {
-      minX = Math.min(start.x, end.x);
-      maxX = Math.max(start.x, end.x);
-    } else if (isForwardSelection) {
-      if (index === startLine) {
-        minX = start.x;
-      }
+    if (!isFirst && !isLast) {
+      // Middle line: select everything, merge into one highlight rect per line
+      const lineText = line.elements
+        .map(({ element }) => element.textContent?.trim())
+        .filter(Boolean)
+        .join(" ");
 
-      if (index === endLine) {
-        maxX = end.x;
-      }
-    } else {
-      if (index === startLine) {
-        maxX = start.x;
+      if (lineText) {
+        textParts.push(lineText);
       }
 
-      if (index === endLine) {
-        minX = end.x;
+      // Merge all element rects into one line-spanning highlight
+      const lineHighlight = mergeLineHighlight(line.elements);
+
+      if (lineHighlight) {
+        highlights.push(lineHighlight);
       }
+
+      continue;
     }
 
-    selected.push(
-      ...line.elements.filter(
-        ({ rect }) => rect.right >= minX && rect.left <= maxX
-      )
-    );
+    // First line, last line, or single line: use character-level precision
+    const lineMinX = isFirst || isSingleLine ? selStartX : Number.NEGATIVE_INFINITY;
+    const lineMaxX = isLast || isSingleLine ? selEndX : Number.POSITIVE_INFINITY;
+
+    const lineTextParts: string[] = [];
+
+    for (const textRect of line.elements) {
+      const { element, page, rect } = textRect;
+
+      // Skip elements entirely outside the X range
+      if (rect.right < lineMinX || rect.left > lineMaxX) {
+        continue;
+      }
+
+      // Element fully within range: use full rect
+      if (rect.left >= lineMinX && rect.right <= lineMaxX) {
+        lineTextParts.push(element.textContent?.trim() || "");
+        const pageRect = page.getBoundingClientRect();
+        highlights.push({
+          page,
+          left: rect.left - pageRect.left - 1,
+          top: rect.top - pageRect.top - 1,
+          width: rect.width + 2,
+          height: rect.height + 2
+        });
+        continue;
+      }
+
+      // Partial selection: use Range + getClientRects for character-level precision
+      const charRects = getCharacterRects(element);
+
+      if (charRects.length === 0) {
+        continue;
+      }
+
+      // Find the first and last character indices within the X range
+      let charStart = 0;
+      let charEnd = charRects.length - 1;
+
+      for (let ci = 0; ci < charRects.length; ci += 1) {
+        if (charRects[ci].right >= lineMinX) {
+          charStart = ci;
+          break;
+        }
+      }
+
+      for (let ci = charRects.length - 1; ci >= 0; ci -= 1) {
+        if (charRects[ci].left <= lineMaxX) {
+          charEnd = ci;
+          break;
+        }
+      }
+
+      if (charStart > charEnd) {
+        continue;
+      }
+
+      // Extract the text substring
+      const fullText = element.textContent || "";
+      lineTextParts.push(fullText.slice(charStart, charEnd + 1).trim());
+
+      // Create highlight from the precise character range
+      const pageRect = page.getBoundingClientRect();
+      const firstCharRect = charRects[charStart];
+      const lastCharRect = charRects[charEnd];
+      const highlightLeft = firstCharRect.left;
+      const highlightRight = lastCharRect.right;
+      const highlightTop = Math.min(firstCharRect.top, lastCharRect.top);
+      const highlightBottom = Math.max(firstCharRect.bottom, lastCharRect.bottom);
+
+      highlights.push({
+        page,
+        left: highlightLeft - pageRect.left - 1,
+        top: highlightTop - pageRect.top - 1,
+        width: highlightRight - highlightLeft + 2,
+        height: highlightBottom - highlightTop + 2
+      });
+    }
+
+    const lineText = lineTextParts.filter(Boolean).join(" ");
+
+    if (lineText) {
+      textParts.push(lineText);
+    }
   }
 
-  if (selected.length === 0) {
+  if (highlights.length === 0) {
     return null;
   }
 
-  const selectedElements = new Set(selected.map(({ element }) => element));
-  const text = lines
-    .map((line) =>
-      line.elements
-        .filter(({ element }) => selectedElements.has(element))
-        .map(({ element }) => element.textContent?.trim())
-        .filter(Boolean)
-        .join(" ")
-    )
-    .filter(Boolean)
-    .join("\n")
-    .trim();
-
   return {
-    text,
-    highlights: getHighlightRects(selected)
+    text: textParts.join("\n").trim(),
+    highlights
   };
 }
 
@@ -578,18 +669,66 @@ function getClosestLineIndex(lines: SelectedLine[], y: number): number {
   return closestIndex;
 }
 
-function getHighlightRects(textRects: TextRect[]): HighlightRect[] {
-  return textRects.map(({ page, rect }) => {
-    const pageRect = page.getBoundingClientRect();
+function mergeLineHighlight(elements: TextRect[]): HighlightRect | null {
+  if (elements.length === 0) {
+    return null;
+  }
 
-    return {
-      page,
-      left: rect.left - pageRect.left - 1,
-      top: rect.top - pageRect.top - 1,
-      width: rect.width + 2,
-      height: rect.height + 2
-    };
-  });
+  const page = elements[0].page;
+  const pageRect = page.getBoundingClientRect();
+  let left = Infinity;
+  let top = Infinity;
+  let right = -Infinity;
+  let bottom = -Infinity;
+
+  for (const { rect } of elements) {
+    left = Math.min(left, rect.left);
+    top = Math.min(top, rect.top);
+    right = Math.max(right, rect.right);
+    bottom = Math.max(bottom, rect.bottom);
+  }
+
+  return {
+    page,
+    left: left - pageRect.left - 1,
+    top: top - pageRect.top - 1,
+    width: right - left + 2,
+    height: bottom - top + 2
+  };
+}
+
+function getCharacterRects(element: HTMLElement): DOMRect[] {
+  const textNode = element.firstChild;
+
+  if (!textNode || textNode.nodeType !== Node.TEXT_NODE) {
+    return [];
+  }
+
+  const text = textNode.textContent || "";
+
+  if (text.length === 0) {
+    return [];
+  }
+
+  const range = document.createRange();
+  const rects: DOMRect[] = [];
+
+  for (let i = 0; i < text.length; i += 1) {
+    range.setStart(textNode, i);
+    range.setEnd(textNode, i + 1);
+    const charRect = range.getBoundingClientRect();
+
+    // Some characters (like spaces) may have zero width; use previous rect if available
+    if (charRect.width > 0 && charRect.height > 0) {
+      rects.push(charRect);
+    } else if (rects.length > 0) {
+      rects.push(rects[rects.length - 1]);
+    } else {
+      rects.push(charRect);
+    }
+  }
+
+  return rects;
 }
 
 function getMedian(values: number[]): number {

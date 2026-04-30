@@ -15,6 +15,7 @@ import type { TranslateRequest, TranslateResponse } from "../types";
 const SOURCE_LANGUAGE = "auto";
 const TARGET_LANGUAGE = "zh-CN";
 const TRANSLATE_DEBOUNCE_MS = 350;
+const ZOOM_DEBOUNCE_MS = 200;
 const MIN_SCALE = 0.7;
 const MAX_SCALE = 2.2;
 const SCALE_STEP = 0.1;
@@ -34,6 +35,7 @@ export default function App() {
     useState<PageJumpRequest | null>(null);
   const [outline, setOutline] = useState<PdfOutlineItem[]>([]);
   const [scale, setScale] = useState(1.2);
+  const [previewScale, setPreviewScale] = useState(1.2);
   const [translationWidth, setTranslationWidth] = useState(380);
   const [isResizing, setIsResizing] = useState(false);
   const [isPdfDragActive, setIsPdfDragActive] = useState(false);
@@ -47,6 +49,8 @@ export default function App() {
   const dragDepthRef = useRef(0);
   const requestIdRef = useRef(0);
   const translationCacheRef = useRef(new Map<string, string>());
+  const zoomTimerRef = useRef<number>(0);
+  const pendingScaleRef = useRef(1.2);
 
   const openPdfFile = useCallback(async (file: File) => {
     if (!isPdfFile(file)) {
@@ -86,7 +90,13 @@ export default function App() {
   }, []);
 
   const handleZoomByDelta = useCallback((delta: number) => {
-    setScale((current) => clamp(current + delta, MIN_SCALE, MAX_SCALE));
+    const next = clamp(pendingScaleRef.current + delta, MIN_SCALE, MAX_SCALE);
+    pendingScaleRef.current = next;
+    setPreviewScale(next);
+    window.clearTimeout(zoomTimerRef.current);
+    zoomTimerRef.current = window.setTimeout(() => {
+      setScale(pendingScaleRef.current);
+    }, ZOOM_DEBOUNCE_MS);
   }, []);
 
   const handleDocumentLoad = useCallback((loadedPageCount: number) => {
@@ -317,7 +327,7 @@ export default function App() {
             >
               -
             </button>
-            <span className="zoom-label">{Math.round(scale * 100)}%</span>
+            <span className="zoom-label">{Math.round(previewScale * 100)}%</span>
             <button
               type="button"
               className="icon-button"
@@ -346,6 +356,7 @@ export default function App() {
           <PdfReader
             fileData={fileData}
             scale={scale}
+            previewScale={previewScale}
             pageJumpRequest={pageJumpRequest}
             onZoomByDelta={handleZoomByDelta}
             onDocumentLoad={handleDocumentLoad}

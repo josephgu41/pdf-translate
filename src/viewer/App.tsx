@@ -15,10 +15,10 @@ import type { TranslateRequest, TranslateResponse } from "../types";
 const SOURCE_LANGUAGE = "auto";
 const TARGET_LANGUAGE = "zh-CN";
 const TRANSLATE_DEBOUNCE_MS = 350;
-const ZOOM_DEBOUNCE_MS = 200;
+const ZOOM_DEBOUNCE_MS = 90;
 const MIN_SCALE = 0.7;
 const MAX_SCALE = 5;
-const SCALE_STEP = 0.1;
+const SCALE_STEP = 0.2;
 const MIN_READER_WIDTH = 320;
 const MIN_TRANSLATION_WIDTH = 280;
 const DIVIDER_WIDTH = 8;
@@ -38,6 +38,7 @@ export default function App() {
   const [outline, setOutline] = useState<PdfOutlineItem[]>([]);
   const [scale, setScale] = useState(1.2);
   const [previewScale, setPreviewScale] = useState(1.2);
+  const [zoomInput, setZoomInput] = useState("120");
   const [translationWidth, setTranslationWidth] = useState(380);
   const [isResizing, setIsResizing] = useState(false);
   const [isPdfDragActive, setIsPdfDragActive] = useState(false);
@@ -101,11 +102,29 @@ export default function App() {
     const next = clamp(pendingScaleRef.current + delta, MIN_SCALE, MAX_SCALE);
     pendingScaleRef.current = next;
     setPreviewScale(next);
+    setZoomInput(String(Math.round(next * 100)));
     window.clearTimeout(zoomTimerRef.current);
     zoomTimerRef.current = window.setTimeout(() => {
       setScale(pendingScaleRef.current);
     }, ZOOM_DEBOUNCE_MS);
   }, []);
+
+  const applyZoomInput = useCallback(() => {
+    const normalizedInput = zoomInput.trim().replace(/%$/, "");
+    const zoomPercent = Number(normalizedInput);
+
+    if (!Number.isFinite(zoomPercent)) {
+      setZoomInput(String(Math.round(previewScale * 100)));
+      return;
+    }
+
+    const next = clamp(zoomPercent / 100, MIN_SCALE, MAX_SCALE);
+    pendingScaleRef.current = next;
+    window.clearTimeout(zoomTimerRef.current);
+    setPreviewScale(next);
+    setScale(next);
+    setZoomInput(String(Math.round(next * 100)));
+  }, [previewScale, zoomInput]);
 
   const handleDocumentLoad = useCallback((loadedPageCount: number) => {
     setPageCount(loadedPageCount);
@@ -335,7 +354,25 @@ export default function App() {
             >
               -
             </button>
-            <span className="zoom-label">{Math.round(previewScale * 100)}%</span>
+            <form
+              className="zoom-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                applyZoomInput();
+              }}
+            >
+              <input
+                aria-label="Zoom percentage"
+                className="zoom-input"
+                inputMode="decimal"
+                value={zoomInput}
+                onBlur={applyZoomInput}
+                onChange={(event) => setZoomInput(event.target.value)}
+              />
+              <span className="zoom-percent" aria-hidden="true">
+                %
+              </span>
+            </form>
             <button
               type="button"
               className="icon-button"

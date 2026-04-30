@@ -10,6 +10,8 @@ import * as pdfjsLib from "pdfjs-dist/build/pdf";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.js?url";
 import "pdfjs-dist/web/pdf_viewer.css";
 
+const WHEEL_ZOOM_STEP = 0.2;
+
 type PdfReaderProps = {
   fileData: Uint8Array | null;
   scale: number;
@@ -392,7 +394,7 @@ export default function PdfReader({
     }
 
     event.preventDefault();
-    onZoomByDelta(event.deltaY < 0 ? 0.1 : -0.1);
+    onZoomByDelta(event.deltaY < 0 ? WHEEL_ZOOM_STEP : -WHEEL_ZOOM_STEP);
   };
 
   const handleScroll = () => {

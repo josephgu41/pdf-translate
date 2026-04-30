@@ -24,8 +24,10 @@ const MIN_TRANSLATION_WIDTH = 280;
 const DIVIDER_WIDTH = 8;
 
 type TranslationStatus = "idle" | "loading" | "success" | "error";
+type ThemeMode = "light" | "dark";
 
 export default function App() {
+  const [themeMode, setThemeMode] = useState<ThemeMode>(getInitialThemeMode);
   const [fileName, setFileName] = useState("");
   const [fileData, setFileData] = useState<Uint8Array | null>(null);
   const [pageCount, setPageCount] = useState(0);
@@ -51,6 +53,12 @@ export default function App() {
   const translationCacheRef = useRef(new Map<string, string>());
   const zoomTimerRef = useRef<number>(0);
   const pendingScaleRef = useRef(1.2);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = themeMode;
+    document.documentElement.style.colorScheme = themeMode;
+    window.localStorage.setItem("pdf-translator-theme", themeMode);
+  }, [themeMode]);
 
   const openPdfFile = useCallback(async (file: File) => {
     if (!isPdfFile(file)) {
@@ -336,6 +344,16 @@ export default function App() {
             >
               +
             </button>
+            <button
+              type="button"
+              className="theme-button"
+              aria-label="Toggle dark mode"
+              onClick={() =>
+                setThemeMode((current) => (current === "dark" ? "light" : "dark"))
+              }
+            >
+              {themeMode === "dark" ? "Light" : "Dark"}
+            </button>
           </div>
         </header>
 
@@ -424,6 +442,18 @@ export default function App() {
       </aside>
     </div>
   );
+}
+
+function getInitialThemeMode(): ThemeMode {
+  const storedTheme = window.localStorage.getItem("pdf-translator-theme");
+
+  if (storedTheme === "light" || storedTheme === "dark") {
+    return storedTheme;
+  }
+
+  return window.matchMedia("(prefers-color-scheme: dark)").matches
+    ? "dark"
+    : "light";
 }
 
 function normalizeSelectedText(text: string): string {
